@@ -13,7 +13,7 @@ use orgnotion::org_parser::Node;
 use orgnotion::ports::NotionApi;
 use orgnotion::validate::{post_validate, pre_validate};
 use orgnotion::vault::Vault;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 fn paragraph(rich_text: Vec<RichText>) -> Block {
@@ -44,7 +44,7 @@ fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
 fn pre_validate_passes_when_all_links_resolve() {
     let vault = Vault {
         nodes: vec![node("a", &["b"]), node("b", &["a"])],
-        flat_dirs: BTreeSet::default(),
+        indexes: BTreeMap::default(),
     };
     assert!(pre_validate(&vault).is_ok());
 }
@@ -53,7 +53,7 @@ fn pre_validate_passes_when_all_links_resolve() {
 fn pre_validate_collects_every_broken_link() {
     let vault = Vault {
         nodes: vec![node("a", &["ghost-1", "b"]), node("b", &["ghost-2"])],
-        flat_dirs: BTreeSet::default(),
+        indexes: BTreeMap::default(),
     };
     let broken = pre_validate(&vault).unwrap_err();
     assert_eq!(broken.len(), 2);
@@ -69,7 +69,7 @@ fn pre_validate_collects_every_broken_link() {
 fn pre_validate_of_empty_vault_passes() {
     let vault = Vault {
         nodes: vec![],
-        flat_dirs: BTreeSet::default(),
+        indexes: BTreeMap::default(),
     };
     assert!(pre_validate(&vault).is_ok());
 }

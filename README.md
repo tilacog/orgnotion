@@ -20,18 +20,28 @@ Only directories that (transitively) contain `.org` files get a page.
     └── ...
 ```
 
-**Flat directories.** A `.FLAT` file in a directory merges
-the `.org` files directly inside it (non-recursive) into a single page
-that takes the directory page's place and name (subdirectories still
-nest under it). Files are concatenated in file-name order, each
-introduced by its `#+TITLE:` as a Heading 1; links to any merged node
-mention the merged page. At the vault root, content lands on the
-snapshot root page itself.
+**Index nodes.** An `.INDEX` file in a directory names one of its
+`.org` files as the directory's index node and picks a layout:
+
+```
+index.org
+flat = true
+```
+
+The index node's content is rendered directly on the directory's page,
+which takes the node's `#+TITLE:` instead of the directory basename
+(subdirectories still nest under it). With `flat = true`, the
+directory's other `.org` files (non-recursive) are concatenated onto
+that same page after the index node, in file-name order, each
+introduced by its `#+TITLE:` as a Heading 1; links to any of them
+mention the shared page. With `flat = false`, they keep their own child
+pages as usual. Both lines are required, in any order; blank lines are
+ignored. At the vault root, the index content lands on the snapshot
+root page itself (which keeps its own title).
 
 **Unreviewed nodes.** A node tagged `:unreviewed:` (via `#+filetags:`)
-gets its first Heading 1 colored red, with a red-text ⚠️ callout below
-it warning that the content hasn't been reviewed. Without a Heading 1,
-the callout leads the page.
+gets a red-text ⚠️ callout as its first block, warning that the content
+hasn't been reviewed.
 
 **Validation.** Pre-validation: every `[[id:...]]` link must resolve
 within the vault, or the run aborts before writing anything.

@@ -71,8 +71,8 @@ fn real_fs_reads_file_contents() {
 #[test]
 fn real_fs_file_exists_only_for_regular_files() {
     let vault = TempVault::new("exists");
-    vault.write("sub/.FLAT", "");
-    assert!(RealFileSystem.file_exists(&vault.root.join("sub/.FLAT")));
+    vault.write("sub/.INDEX", "");
+    assert!(RealFileSystem.file_exists(&vault.root.join("sub/.INDEX")));
     assert!(!RealFileSystem.file_exists(&vault.root.join("sub"))); // a directory
     assert!(!RealFileSystem.file_exists(&vault.root.join("missing")));
 }

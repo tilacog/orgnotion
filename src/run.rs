@@ -179,15 +179,12 @@ fn report_dry_run(
         for ancestor in ancestors_shallowest_first(&dir) {
             if printed_dirs.insert(ancestor.clone()) {
                 let indent = "  ".repeat(ancestor.components().count());
-                let flat = if vault.flat_dirs.contains(&ancestor) {
-                    " (flat)"
-                } else {
-                    ""
+                let name = directory_page_title(vault, &ancestor);
+                let flat = match vault.indexes.get(&ancestor) {
+                    Some(index) if index.flat => " (flat)",
+                    _ => "",
                 };
-                reporter.info(&format!(
-                    "{indent}- {}/{flat}",
-                    ancestor.file_name().unwrap_or_default().to_string_lossy()
-                ));
+                reporter.info(&format!("{indent}- {name}/{flat}"));
             }
         }
         let indent = "  ".repeat(dir.components().count() + 1);
@@ -216,6 +213,36 @@ fn node_dir(node: &crate::org_parser::Node, vault_dir: &Path) -> PathBuf {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default()
+}
+
+/// Where a node's content lands in the page tree.
+#[derive(PartialEq)]
+enum Placement {
+    /// The index node of its directory: content goes on the directory's
+    /// page, which takes the node's title.
+    Index,
+    /// A non-index node of a `flat = true` directory: content is
+    /// concatenated onto the directory's page after the index node.
+    Merged,
+    /// A regular node with a page of its own.
+    Paged,
+}
+
+fn placement(vault: &vault::Vault, vault_dir: &Path, node: &Node) -> Placement {
+    match vault.indexes.get(&node_dir(node, vault_dir)) {
+        Some(index) if index.file == node.file_path => Placement::Index,
+        Some(index) if index.flat => Placement::Merged,
+        _ => Placement::Paged,
+    }
+}
+
+/// A directory page's title: its index node's title if it has one, the
+/// directory basename otherwise.
+fn directory_page_title<'a>(vault: &'a vault::Vault, dir: &'a Path) -> std::borrow::Cow<'a, str> {
+    match vault.index_node(dir) {
+        Some(node) => node.title.as_str().into(),
+        None => dir.file_name().unwrap_or_default().to_string_lossy(),
+    }
 }
 
 /// `dir` and every ancestor up to (not including) the vault root,
@@ -313,7 +340,7 @@ async fn create_directory_pages(
     dir_pages.insert(PathBuf::new(), root.id.clone());
     for dir in &dirs {
         let parent = &dir_pages[dir.parent().unwrap_or(Path::new(""))];
-        let dir_title = dir.file_name().unwrap_or_default().to_string_lossy();
+        let dir_title = directory_page_title(vault, dir);
         let page = notion
             .create_page(parent, &dir_title)
             .await
@@ -334,9 +361,9 @@ async fn create_directory_pages(
 /// therefore any link mention) is written. Creation is deliberately
 /// sequential, in path-sorted node order: Notion shows sibling pages in
 /// creation order and offers no reorder API, so concurrent creation
-/// would scramble the sorted order. Nodes in a flat directory get
-/// no page of their own: they map to their directory's page, onto which
-/// their content is concatenated in pass 2.
+/// would scramble the sorted order. Index nodes and nodes merged by a
+/// `flat = true` index get no page of their own: they map to their
+/// directory's page, onto which their content is written in pass 2.
 async fn create_node_pages(
     vault: &vault::Vault,
     vault_dir: &Path,
@@ -345,18 +372,18 @@ async fn create_node_pages(
     notion: &impl NotionApi,
     reporter: &mut impl Reporter,
 ) -> Result<HashMap<String, String>, RunError> {
-    let (merged_nodes, paged_nodes): (Vec<&Node>, Vec<&Node>) = vault
+    let (on_dir_page, paged_nodes): (Vec<&Node>, Vec<&Node>) = vault
         .nodes
         .iter()
-        .partition(|node| vault.flat_dirs.contains(&node_dir(node, vault_dir)));
-    if merged_nodes.is_empty() {
+        .partition(|node| placement(vault, vault_dir, node) != Placement::Paged);
+    if on_dir_page.is_empty() {
         reporter.info(&format!("Creating {} node page(s)...", paged_nodes.len()));
     } else {
         reporter.info(&format!(
-            "Creating {} node page(s) ({} node(s) merged into {} flat page(s))...",
+            "Creating {} node page(s) ({} node(s) rendered on {} directory page(s))...",
             paged_nodes.len(),
-            merged_nodes.len(),
-            vault.flat_dirs.len()
+            on_dir_page.len(),
+            vault.indexes.len()
         ));
     }
     let mut id_to_page: HashMap<String, String> = HashMap::new();
@@ -371,7 +398,7 @@ async fn create_node_pages(
             ))?;
         id_to_page.insert(node.id.clone(), page.id);
     }
-    for node in merged_nodes {
+    for node in on_dir_page {
         let dir = node_dir(node, vault_dir);
         id_to_page.insert(node.id.clone(), dir_pages[&dir].clone());
     }
@@ -381,10 +408,10 @@ async fn create_node_pages(
 /// Pass 2: convert and write each node's content, links rewritten into
 /// page mentions via the now-complete map. Writes are buffered across
 /// pages but sequential within a page: chunk order matters, and nodes
-/// sharing a flat page must land in node order — path-sorted, so a
-/// directory's files concatenate in file-name order — each introduced by
-/// its title as a heading (the title otherwise lives only in the page
-/// name).
+/// sharing a directory page must land in order — the index node first,
+/// then the merged nodes in file-name order, each merged node introduced
+/// by its title as a heading (the title otherwise lives only in the page
+/// name; the index node's title IS the page name, so it gets no heading).
 async fn write_content(
     vault: &vault::Vault,
     vault_dir: &Path,
@@ -397,10 +424,21 @@ async fn write_content(
     reporter.info("Writing content...");
     let converter = Converter::new().with_notion_transformer(anchors_to_bold);
 
+    // Index nodes must lead their directory's page even when their file
+    // name sorts after their siblings'; the stable sort keeps everything
+    // else in path order.
+    let mut ordered: Vec<&Node> = vault.nodes.iter().collect();
+    ordered.sort_by_key(|node| {
+        (
+            node_dir(node, vault_dir),
+            placement(vault, vault_dir, node) != Placement::Index,
+        )
+    });
+
     // Group nodes by target page, preserving node order within each group.
     let mut groups: Vec<(&String, Vec<&Node>)> = Vec::new();
     let mut group_of: HashMap<&String, usize> = HashMap::new();
-    for node in &vault.nodes {
+    for node in ordered {
         let page_id = &id_to_page[&node.id];
         if let Some(&i) = group_of.get(page_id) {
             groups[i].1.push(node);
@@ -416,7 +454,7 @@ async fn write_content(
             async move {
                 let mut count = 0usize;
                 for node in nodes {
-                    let mut blocks = if vault.flat_dirs.contains(&node_dir(node, vault_dir)) {
+                    let mut blocks = if placement(vault, vault_dir, node) == Placement::Merged {
                         let mut with_title = vec![OrgBlock::Heading {
                             level: 1,
                             spans: vec![Span::Text(node.title.clone())],
@@ -448,8 +486,7 @@ async fn write_content(
 
 /// Post-validation: read every page back and confirm the expected
 /// mentions actually landed. Each unique page is fetched once, buffered
-/// `concurrency`-wide — nodes merged onto a flat page share the
-/// fetch.
+/// `concurrency`-wide — nodes sharing a directory page share the fetch.
 async fn post_validate_pages(
     vault: &vault::Vault,
     id_to_page: &HashMap<String, String>,

@@ -196,44 +196,60 @@ async fn unreviewed_node_gets_warning_callout_as_first_block() {
 }
 
 #[tokio::test]
-async fn flat_dir_merges_files_into_one_page_sorted_by_name() {
+async fn flat_index_dir_merges_files_onto_the_index_page() {
     let notion = FakeNotion::new();
     let fs = InMemoryFileSystem::with_files(&[
-        // Declared out of name order; concatenation must sort by file name.
+        // Declared out of name order; concatenation must sort by file
+        // name — except the index node, which always leads even though
+        // "z-index.org" sorts last.
         ("/vault/merged/b.org", &org("b", "Title B", "Content of B.")),
         (
             "/vault/merged/a.org",
             &org("a", "Title A", "Content of A. See [[id:b][B]]."),
         ),
-        ("/vault/merged/.FLAT", ""),
+        (
+            "/vault/merged/z-index.org",
+            &org("i", "Merged Index", "Index intro."),
+        ),
+        ("/vault/merged/.INDEX", "z-index.org\nflat = true\n"),
         (
             "/vault/outside.org",
             &org("out", "Outside", "Points into [[id:a][A]]."),
         ),
     ]);
     let report = run_with(&config(), &fs, &notion).await.unwrap();
-    assert_eq!(report.node_count, 3);
+    assert_eq!(report.node_count, 4);
 
-    // Root + the merged directory page + the one regular node page.
+    // Root + the merged directory page + the one regular node page. The
+    // directory page takes the index node's title, not the dir basename.
     let pages = notion.pages();
     assert_eq!(pages.len(), 3);
     let root = &pages[0];
-    let merged = pages.iter().find(|p| p.title == "merged").unwrap();
+    let merged = pages.iter().find(|p| p.title == "Merged Index").unwrap();
     let outside = pages.iter().find(|p| p.title == "Outside").unwrap();
     assert_eq!(merged.parent_id, root.id);
+    assert!(!pages.iter().any(|p| p.title == "merged"));
     assert!(!pages.iter().any(|p| p.title == "Title A"));
 
-    // Merged content: title heading + body per file, in file-name order.
+    // Index content first with no title heading (the page name carries
+    // its title), then title heading + body per file in file-name order.
     let texts = page_texts(&notion, &merged.id);
     let kinds: Vec<&str> = texts.iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(
         kinds,
-        vec!["heading_1", "paragraph", "heading_1", "paragraph"]
+        vec![
+            "paragraph",
+            "heading_1",
+            "paragraph",
+            "heading_1",
+            "paragraph"
+        ]
     );
-    assert_eq!(texts[0].1, "Title A");
-    assert!(texts[1].1.starts_with("Content of A."), "got: {texts:?}");
-    assert_eq!(texts[2].1, "Title B");
-    assert_eq!(texts[3].1, "Content of B.");
+    assert_eq!(texts[0].1, "Index intro.");
+    assert_eq!(texts[1].1, "Title A");
+    assert!(texts[2].1.starts_with("Content of A."), "got: {texts:?}");
+    assert_eq!(texts[3].1, "Title B");
+    assert_eq!(texts[4].1, "Content of B.");
 
     // A link into the merged dir mentions the merged page.
     let outside_content = serde_json::to_value(notion.children_of(&outside.id)).unwrap();
@@ -258,32 +274,67 @@ async fn flat_dir_merges_files_into_one_page_sorted_by_name() {
 }
 
 #[tokio::test]
-async fn flat_marker_at_vault_root_appends_to_the_snapshot_root_page() {
+async fn non_flat_index_renders_on_the_directory_page_with_child_pages() {
+    let notion = FakeNotion::new();
+    let fs = InMemoryFileSystem::with_files(&[
+        ("/vault/sub/index.org", &org("i", "Sub Index", "Overview.")),
+        ("/vault/sub/a.org", &org("a", "Title A", "Content of A.")),
+        ("/vault/sub/.INDEX", "index.org\nflat = false\n"),
+    ]);
+    let report = run_with(&config(), &fs, &notion).await.unwrap();
+    assert_eq!(report.node_count, 2);
+
+    // Root + the directory page (titled by the index node) + one child
+    // page for the non-index node. The index node has no page of its own.
+    let pages = notion.pages();
+    assert_eq!(pages.len(), 3);
+    let dir_page = pages.iter().find(|p| p.title == "Sub Index").unwrap();
+    let child = pages.iter().find(|p| p.title == "Title A").unwrap();
+    assert_eq!(dir_page.parent_id, pages[0].id);
+    assert_eq!(child.parent_id, dir_page.id);
+
+    // The index content sits on the directory page, without a heading.
+    let texts = page_texts(&notion, &dir_page.id);
+    assert_eq!(
+        texts,
+        vec![("paragraph".to_string(), "Overview.".to_string())]
+    );
+    let child_texts = page_texts(&notion, &child.id);
+    assert_eq!(
+        child_texts,
+        vec![("paragraph".to_string(), "Content of A.".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn index_marker_at_vault_root_appends_to_the_snapshot_root_page() {
     let notion = FakeNotion::new();
     let fs = InMemoryFileSystem::with_files(&[
         ("/vault/a.org", &org("a", "Title A", "Content of A.")),
         ("/vault/b.org", &org("b", "Title B", "Content of B.")),
-        ("/vault/.FLAT", ""),
+        ("/vault/.INDEX", "a.org\nflat = true\n"),
     ]);
     run_with(&config(), &fs, &notion).await.unwrap();
 
     let pages = notion.pages();
     assert_eq!(pages.len(), 1); // only the snapshot root
     let texts = page_texts(&notion, &pages[0].id);
-    let headings: Vec<&str> = texts
-        .iter()
-        .filter(|(k, _)| k == "heading_1")
-        .map(|(_, t)| t.as_str())
-        .collect();
-    assert_eq!(headings, vec!["Title A", "Title B"]);
+    // The index node (a.org) leads without a heading; b.org follows
+    // introduced by its title.
+    let kinds: Vec<&str> = texts.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(kinds, vec!["paragraph", "heading_1", "paragraph"]);
+    assert_eq!(texts[0].1, "Content of A.");
+    assert_eq!(texts[1].1, "Title B");
+    assert_eq!(texts[2].1, "Content of B.");
 }
 
 #[tokio::test]
-async fn dry_run_marks_flat_directories() {
+async fn dry_run_marks_flat_index_directories() {
     let notion = FakeNotion::new();
     let fs = InMemoryFileSystem::with_files(&[
         ("/vault/merged/a.org", &org("a", "Title A", "Body.")),
-        ("/vault/merged/.FLAT", ""),
+        ("/vault/merged/index.org", &org("i", "Merged Index", "Body.")),
+        ("/vault/merged/.INDEX", "index.org\nflat = true\n"),
         ("/vault/normal/b.org", &org("b", "Title B", "Body.")),
     ]);
     let cfg = RunConfig {
@@ -303,7 +354,8 @@ async fn dry_run_marks_flat_directories() {
     .unwrap();
 
     let output = reporter.lines.join("\n");
-    assert!(output.contains("  - merged/ (flat)"), "got: {output}");
+    // The indexed directory shows under its index node's title.
+    assert!(output.contains("  - Merged Index/ (flat)"), "got: {output}");
     assert!(output.contains("  - normal/\n"), "got: {output}");
 }
 
