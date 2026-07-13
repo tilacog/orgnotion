@@ -1,0 +1,18 @@
+# CRAP (Change Risk Anti-Patterns) gate: complexity² × (1 − coverage)³ + complexity.
+#
+# Threshold calibrated against this codebase (2026-07): the worst offender
+# is `main` at 20.0 (CC 4, uncovered by design — it's the injection point
+# for the real adapters); everything else sits at ≤ 10.2 thanks to
+# near-full coverage of complex functions. 25 keeps `main` passing while
+# failing the build if any function grows both complex and under-tested.
+# The default (30) was looser than this project needs.
+threshold = 25.0
+fail-above = true
+
+# Functions with complexity data but no LCOV entry count as 0% covered —
+# uninstrumented code should look risky, not invisible.
+missing = "pessimistic"
+
+# Test code (including the in-memory port fakes) is not production
+# surface; the gate applies to src/ only.
+exclude = ["tests/**"]

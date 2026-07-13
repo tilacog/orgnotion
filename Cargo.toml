@@ -1,0 +1,25 @@
+[package]
+name = "orgnotion"
+version = "0.1.0"
+edition = "2024"
+description = "Publish an Org-roam vault as a fresh, read-only snapshot in Notion."
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+walkdir = "2"
+orgize = "0.10.0-alpha.10"
+jiff = "0.2"
+notionrs = "0.28.0"
+notionrs_types = "0.21.0"
+serde = { version = "1", features = ["derive"] }
+# Same version/TLS stack notionrs uses; needed only for the
+# `list_children` workaround in the adapter (see adapters::notion_client).
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+tokio = { version = "1.52.3", features = ["macros", "rt", "time"] }
+futures = "0.3"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

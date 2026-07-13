@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Pre-commit gate: formatting, pedantic clippy, and the CRAP metric
+# (cyclomatic complexity × test coverage) must all pass.
+#
+# Install (once, from the repo root):
+#   ln -sf ../../scripts/pre-commit .git/hooks/pre-commit
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-commit: cargo fmt --check"
+cargo fmt --check
+
+echo "pre-commit: cargo clippy (pedantic via [lints.clippy] in Cargo.toml)"
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "pre-commit: cargo llvm-cov (runs the test suite)"
+cargo llvm-cov --lcov --output-path lcov.info
+
+echo "pre-commit: cargo crap --fail-above (threshold in .cargo-crap.toml)"
+cargo crap --lcov lcov.info --fail-above
+
+echo "pre-commit: all checks passed"
