@@ -179,13 +179,13 @@ fn report_dry_run(
         for ancestor in ancestors_shallowest_first(&dir) {
             if printed_dirs.insert(ancestor.clone()) {
                 let indent = "  ".repeat(ancestor.components().count());
-                let continuous = if vault.continuous_dirs.contains(&ancestor) {
-                    " (continuous)"
+                let flat = if vault.flat_dirs.contains(&ancestor) {
+                    " (flat)"
                 } else {
                     ""
                 };
                 reporter.info(&format!(
-                    "{indent}- {}/{continuous}",
+                    "{indent}- {}/{flat}",
                     ancestor.file_name().unwrap_or_default().to_string_lossy()
                 ));
             }
@@ -334,7 +334,7 @@ async fn create_directory_pages(
 /// therefore any link mention) is written. Creation is deliberately
 /// sequential, in path-sorted node order: Notion shows sibling pages in
 /// creation order and offers no reorder API, so concurrent creation
-/// would scramble the sorted order. Nodes in a continuous directory get
+/// would scramble the sorted order. Nodes in a flat directory get
 /// no page of their own: they map to their directory's page, onto which
 /// their content is concatenated in pass 2.
 async fn create_node_pages(
@@ -348,15 +348,15 @@ async fn create_node_pages(
     let (merged_nodes, paged_nodes): (Vec<&Node>, Vec<&Node>) = vault
         .nodes
         .iter()
-        .partition(|node| vault.continuous_dirs.contains(&node_dir(node, vault_dir)));
+        .partition(|node| vault.flat_dirs.contains(&node_dir(node, vault_dir)));
     if merged_nodes.is_empty() {
         reporter.info(&format!("Creating {} node page(s)...", paged_nodes.len()));
     } else {
         reporter.info(&format!(
-            "Creating {} node page(s) ({} node(s) merged into {} continuous page(s))...",
+            "Creating {} node page(s) ({} node(s) merged into {} flat page(s))...",
             paged_nodes.len(),
             merged_nodes.len(),
-            vault.continuous_dirs.len()
+            vault.flat_dirs.len()
         ));
     }
     let mut id_to_page: HashMap<String, String> = HashMap::new();
@@ -381,7 +381,7 @@ async fn create_node_pages(
 /// Pass 2: convert and write each node's content, links rewritten into
 /// page mentions via the now-complete map. Writes are buffered across
 /// pages but sequential within a page: chunk order matters, and nodes
-/// sharing a continuous page must land in node order — path-sorted, so a
+/// sharing a flat page must land in node order — path-sorted, so a
 /// directory's files concatenate in file-name order — each introduced by
 /// its title as a heading (the title otherwise lives only in the page
 /// name).
@@ -416,7 +416,7 @@ async fn write_content(
             async move {
                 let mut count = 0usize;
                 for node in nodes {
-                    let mut blocks = if vault.continuous_dirs.contains(&node_dir(node, vault_dir)) {
+                    let mut blocks = if vault.flat_dirs.contains(&node_dir(node, vault_dir)) {
                         let mut with_title = vec![OrgBlock::Heading {
                             level: 1,
                             spans: vec![Span::Text(node.title.clone())],
@@ -448,7 +448,7 @@ async fn write_content(
 
 /// Post-validation: read every page back and confirm the expected
 /// mentions actually landed. Each unique page is fetched once, buffered
-/// `concurrency`-wide — nodes merged onto a continuous page share the
+/// `concurrency`-wide — nodes merged onto a flat page share the
 /// fetch.
 async fn post_validate_pages(
     vault: &vault::Vault,

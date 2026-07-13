@@ -20,7 +20,7 @@ Only directories that (transitively) contain `.org` files get a page.
     └── ...
 ```
 
-**Continuous directories.** A `.CONTINUOUS` file in a directory merges
+**Flat directories.** A `.FLAT` file in a directory merges
 the `.org` files directly inside it (non-recursive) into a single page
 that takes the directory page's place and name (subdirectories still
 nest under it). Files are concatenated in file-name order, each

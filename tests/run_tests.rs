@@ -196,7 +196,7 @@ async fn unreviewed_node_gets_warning_callout_as_first_block() {
 }
 
 #[tokio::test]
-async fn continuous_dir_merges_files_into_one_page_sorted_by_name() {
+async fn flat_dir_merges_files_into_one_page_sorted_by_name() {
     let notion = FakeNotion::new();
     let fs = InMemoryFileSystem::with_files(&[
         // Declared out of name order; concatenation must sort by file name.
@@ -205,7 +205,7 @@ async fn continuous_dir_merges_files_into_one_page_sorted_by_name() {
             "/vault/merged/a.org",
             &org("a", "Title A", "Content of A. See [[id:b][B]]."),
         ),
-        ("/vault/merged/.CONTINUOUS", ""),
+        ("/vault/merged/.FLAT", ""),
         (
             "/vault/outside.org",
             &org("out", "Outside", "Points into [[id:a][A]]."),
@@ -258,12 +258,12 @@ async fn continuous_dir_merges_files_into_one_page_sorted_by_name() {
 }
 
 #[tokio::test]
-async fn continuous_marker_at_vault_root_appends_to_the_snapshot_root_page() {
+async fn flat_marker_at_vault_root_appends_to_the_snapshot_root_page() {
     let notion = FakeNotion::new();
     let fs = InMemoryFileSystem::with_files(&[
         ("/vault/a.org", &org("a", "Title A", "Content of A.")),
         ("/vault/b.org", &org("b", "Title B", "Content of B.")),
-        ("/vault/.CONTINUOUS", ""),
+        ("/vault/.FLAT", ""),
     ]);
     run_with(&config(), &fs, &notion).await.unwrap();
 
@@ -279,11 +279,11 @@ async fn continuous_marker_at_vault_root_appends_to_the_snapshot_root_page() {
 }
 
 #[tokio::test]
-async fn dry_run_marks_continuous_directories() {
+async fn dry_run_marks_flat_directories() {
     let notion = FakeNotion::new();
     let fs = InMemoryFileSystem::with_files(&[
         ("/vault/merged/a.org", &org("a", "Title A", "Body.")),
-        ("/vault/merged/.CONTINUOUS", ""),
+        ("/vault/merged/.FLAT", ""),
         ("/vault/normal/b.org", &org("b", "Title B", "Body.")),
     ]);
     let cfg = RunConfig {
@@ -303,7 +303,7 @@ async fn dry_run_marks_continuous_directories() {
     .unwrap();
 
     let output = reporter.lines.join("\n");
-    assert!(output.contains("  - merged/ (continuous)"), "got: {output}");
+    assert!(output.contains("  - merged/ (flat)"), "got: {output}");
     assert!(output.contains("  - normal/\n"), "got: {output}");
 }
 

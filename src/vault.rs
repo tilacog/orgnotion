@@ -6,10 +6,10 @@ use crate::ports::{FileSystem, FsError};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-/// Marker file that turns a directory "continuous": the `.org` files
+/// Marker file that turns a directory "flat": the `.org` files
 /// directly inside it (non-recursive) are published as a single Notion
 /// page, concatenated in file-name order.
-pub const CONTINUOUS_MARKER: &str = ".CONTINUOUS";
+pub const FLAT_MARKER: &str = ".FLAT";
 
 /// Failure while building the vault index.
 #[derive(Debug, thiserror::Error)]
@@ -43,10 +43,10 @@ pub enum VaultError {
 pub struct Vault {
     /// All parsed nodes.
     pub nodes: Vec<Node>,
-    /// Directories carrying a [`CONTINUOUS_MARKER`] file, relative to the
+    /// Directories carrying a [`FLAT_MARKER`] file, relative to the
     /// vault root (an empty path means the vault root itself). Only
     /// directories directly containing at least one node are recorded.
-    pub continuous_dirs: BTreeSet<PathBuf>,
+    pub flat_dirs: BTreeSet<PathBuf>,
 }
 
 impl Vault {
@@ -90,17 +90,17 @@ pub fn scan(fs: &impl FileSystem, vault_dir: &Path) -> Result<Vault, VaultError>
 
     Ok(Vault {
         nodes,
-        continuous_dirs: continuous_dirs(fs, vault_dir, &paths),
+        flat_dirs: flat_dirs(fs, vault_dir, &paths),
     })
 }
 
 /// The relative directories among the org files' parents that carry a
-/// [`CONTINUOUS_MARKER`] file.
-fn continuous_dirs(fs: &impl FileSystem, vault_dir: &Path, paths: &[PathBuf]) -> BTreeSet<PathBuf> {
+/// [`FLAT_MARKER`] file.
+fn flat_dirs(fs: &impl FileSystem, vault_dir: &Path, paths: &[PathBuf]) -> BTreeSet<PathBuf> {
     paths
         .iter()
         .filter_map(|path| path.parent())
-        .filter(|dir| fs.file_exists(&dir.join(CONTINUOUS_MARKER)))
+        .filter(|dir| fs.file_exists(&dir.join(FLAT_MARKER)))
         .map(|dir| dir.strip_prefix(vault_dir).unwrap_or(dir).to_path_buf())
         .collect()
 }

@@ -112,7 +112,7 @@ pub async fn post_validate(
 
 /// Fetch a page's content back from Notion and collect the page IDs of
 /// every page mention it carries. Callers validating several nodes that
-/// share one page (a continuous directory) fetch once and run
+/// share one page (a flat directory) fetch once and run
 /// [`check_node`] per node.
 ///
 /// # Errors

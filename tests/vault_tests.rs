@@ -26,34 +26,34 @@ fn scans_and_parses_all_org_files_in_sorted_order() {
 }
 
 #[test]
-fn continuous_marker_flags_directories_relative_to_vault_root() {
+fn flat_marker_flags_directories_relative_to_vault_root() {
     let fs = InMemoryFileSystem::with_files(&[
         ("/vault/a.org", &org("a", "Ay", "aaa")),
         ("/vault/merged/b.org", &org("b", "Bee", "bbb")),
-        ("/vault/merged/.CONTINUOUS", ""),
+        ("/vault/merged/.FLAT", ""),
         ("/vault/normal/c.org", &org("c", "Cee", "ccc")),
     ]);
     let vault = scan(&fs, Path::new(VAULT)).unwrap();
-    let dirs: Vec<_> = vault.continuous_dirs.iter().collect();
+    let dirs: Vec<_> = vault.flat_dirs.iter().collect();
     assert_eq!(dirs, vec![Path::new("merged")]);
 }
 
 #[test]
-fn continuous_marker_at_vault_root_is_the_empty_path() {
+fn flat_marker_at_vault_root_is_the_empty_path() {
     let fs = InMemoryFileSystem::with_files(&[
         ("/vault/a.org", &org("a", "Ay", "aaa")),
-        ("/vault/.CONTINUOUS", ""),
+        ("/vault/.FLAT", ""),
     ]);
     let vault = scan(&fs, Path::new(VAULT)).unwrap();
-    let dirs: Vec<_> = vault.continuous_dirs.iter().collect();
+    let dirs: Vec<_> = vault.flat_dirs.iter().collect();
     assert_eq!(dirs, vec![Path::new("")]);
 }
 
 #[test]
-fn no_marker_means_no_continuous_dirs() {
+fn no_marker_means_no_flat_dirs() {
     let fs = InMemoryFileSystem::with_files(&[("/vault/sub/a.org", &org("a", "Ay", "aaa"))]);
     let vault = scan(&fs, Path::new(VAULT)).unwrap();
-    assert!(vault.continuous_dirs.is_empty());
+    assert!(vault.flat_dirs.is_empty());
 }
 
 #[test]
