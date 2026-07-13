@@ -42,31 +42,14 @@ pub fn anchors_to_bold(blocks: Vec<Block>) -> Vec<Block> {
 }
 
 /// A [`crate::converter::NotionTransformer`] step that flags a page built
-/// from an `:unreviewed:` org-roam node: the first level-1 heading is
-/// colored red and a red-text ⚠️ warning callout is inserted right below
-/// it. A page with no level-1 heading gets the callout as its first block.
+/// from an `:unreviewed:` org-roam node: a red-text ⚠️ warning callout is
+/// inserted as the page's first block.
 ///
 /// Applied per node (after conversion) rather than registered on the
 /// shared [`crate::converter::Converter`], since only tagged nodes get it.
 #[must_use]
 pub fn unreviewed_banner(mut blocks: Vec<Block>) -> Vec<Block> {
-    let first_h1 = blocks
-        .iter_mut()
-        .enumerate()
-        .find_map(|(i, block)| match block {
-            Block::Heading1 { heading_1 } => Some((i, heading_1)),
-            _ => None,
-        });
-    let callout_at = match first_h1 {
-        Some((i, heading)) => {
-            for run in &mut heading.rich_text {
-                set_color(run, Color::Red);
-            }
-            i + 1
-        }
-        None => 0,
-    };
-    blocks.insert(callout_at, warning_callout());
+    blocks.insert(0, warning_callout());
     blocks
 }
 

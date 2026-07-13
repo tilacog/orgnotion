@@ -155,7 +155,7 @@ fn page_texts(notion: &FakeNotion, page_id: &str) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
-async fn unreviewed_node_gets_red_h1_and_warning_callout() {
+async fn unreviewed_node_gets_warning_callout_as_first_block() {
     let notion = FakeNotion::new();
     let fs = InMemoryFileSystem::with_files(&[
         (
@@ -178,24 +178,17 @@ async fn unreviewed_node_gets_red_h1_and_warning_callout() {
 
     let children = serde_json::to_value(notion.children_of(&page_of("Node A"))).unwrap();
     let children = children.as_array().unwrap();
-    assert_eq!(children[0]["type"], "heading_1");
-    assert!(
-        children[0]["heading_1"]["rich_text"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|rt| rt["annotations"]["color"] == "red")
-    );
-    assert_eq!(children[1]["type"], "callout");
+    assert_eq!(children[0]["type"], "callout");
     assert_eq!(
-        children[1]["callout"]["rich_text"][0]["text"]["content"],
+        children[0]["callout"]["rich_text"][0]["text"]["content"],
         "This content hasn't been reviewed yet, proceed with caution"
     );
     assert_eq!(
-        children[1]["callout"]["rich_text"][0]["annotations"]["color"],
+        children[0]["callout"]["rich_text"][0]["annotations"]["color"],
         "red"
     );
-    assert_eq!(children[1]["callout"]["icon"]["emoji"], "⚠️");
+    assert_eq!(children[0]["callout"]["icon"]["emoji"], "⚠️");
+    assert_eq!(children[1]["type"], "heading_1");
 
     // The untagged node is untouched: normal heading color, no callout.
     let kinds_b = page_texts(&notion, &page_of("Node B"));

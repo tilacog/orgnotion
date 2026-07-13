@@ -138,30 +138,19 @@ fn assert_warning_callout(block: &Block) {
 }
 
 #[test]
-fn unreviewed_banner_reddens_first_h1_and_inserts_callout_below_it() {
+fn unreviewed_banner_prepends_callout_leaving_content_untouched() {
     let blocks = vec![
         paragraph(vec![text_run("intro")]),
         h1(vec![text_run("Title "), page_mention("p1")]),
-        h1(vec![text_run("Second")]),
     ];
     let out = unreviewed_banner(blocks);
-    assert_eq!(out.len(), 4);
-    for run in rich_text_of(&out[1]) {
-        assert_eq!(run_color(run), Color::Red);
-    }
-    assert_warning_callout(&out[2]);
-    // The paragraph and the second h1 are untouched.
-    assert_eq!(rich_text_of(&out[0]), &[text_run("intro")]);
-    assert_eq!(rich_text_of(&out[3]), &[text_run("Second")]);
-}
-
-#[test]
-fn unreviewed_banner_without_h1_prepends_callout() {
-    let blocks = vec![paragraph(vec![text_run("body")])];
-    let out = unreviewed_banner(blocks);
-    assert_eq!(out.len(), 2);
+    assert_eq!(out.len(), 3);
     assert_warning_callout(&out[0]);
-    assert_eq!(rich_text_of(&out[1]), &[text_run("body")]);
+    assert_eq!(rich_text_of(&out[1]), &[text_run("intro")]);
+    assert_eq!(
+        rich_text_of(&out[2]),
+        &[text_run("Title "), page_mention("p1")]
+    );
 }
 
 #[test]
