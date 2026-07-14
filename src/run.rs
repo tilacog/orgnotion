@@ -5,10 +5,10 @@
 //! Generic over every I/O port, so the whole flow is unit-testable with
 //! in-memory fakes.
 
-use crate::converter::Converter;
+use crate::converter::{Converter, LinkTarget};
 use crate::notion::append_children_chunked;
 use crate::org_parser::{Node, OrgBlock, Span};
-use crate::ports::{Clock, Env, NotionApi, Reporter};
+use crate::ports::{AppendPosition, Clock, Env, NotionApi, Reporter};
 use crate::transformers::{anchors_to_bold, unreviewed_banner};
 use crate::vault::VaultError;
 use crate::{validate, vault};
@@ -245,6 +245,25 @@ fn directory_page_title<'a>(vault: &'a vault::Vault, dir: &'a Path) -> std::borr
     }
 }
 
+/// A node's file name with the org-roam timestamp prefix
+/// (`YYYYMMDDHHMMSS-`) stripped, falling back to the full file name if no
+/// prefix is present. Used to sort merged siblings by their logical name
+/// (e.g. `1-purpose`) rather than by creation time.
+fn sortable_file_name(node: &Node) -> String {
+    let name = node
+        .file_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if name.len() > 15 && name.as_bytes()[14] == b'-' {
+        let prefix = &name[..14];
+        if prefix.chars().all(|c| c.is_ascii_digit()) {
+            return name[15..].to_string();
+        }
+    }
+    name
+}
+
 /// `dir` and every ancestor up to (not including) the vault root,
 /// shallowest first — e.g. `backend/autopilot` → `[backend,
 /// backend/autopilot]`.
@@ -279,7 +298,7 @@ async fn publish(
     let dir_pages = create_directory_pages(vault, vault_dir, &root, notion, reporter).await?;
     let id_to_page =
         create_node_pages(vault, vault_dir, &dir_pages, &root, notion, reporter).await?;
-    let block_count = write_content(
+    let (block_count, id_to_link) = write_content(
         vault,
         vault_dir,
         &id_to_page,
@@ -289,7 +308,7 @@ async fn publish(
         reporter,
     )
     .await?;
-    post_validate_pages(vault, &id_to_page, &root, concurrency, notion, reporter).await?;
+    post_validate_pages(vault, &id_to_link, &root, concurrency, notion, reporter).await?;
 
     Ok(RunReport {
         node_count: vault.nodes.len(),
@@ -405,13 +424,73 @@ async fn create_node_pages(
     Ok(id_to_page)
 }
 
-/// Pass 2: convert and write each node's content, links rewritten into
-/// page mentions via the now-complete map. Writes are buffered across
-/// pages but sequential within a page: chunk order matters, and nodes
-/// sharing a directory page must land in order — the index node first,
-/// then the merged nodes in file-name order, each merged node introduced
-/// by its title as a heading (the title otherwise lives only in the page
-/// name; the index node's title IS the page name, so it gets no heading).
+/// Phase A of [`write_content`]: for each directory page with on-page
+/// nodes, write the index node's content (if any) and each merged node's
+/// heading block, in display order. Returns a map of merged node ID →
+/// heading block ID, used to build block-level link URLs.
+async fn write_headings_and_index(
+    vault: &vault::Vault,
+    vault_dir: &Path,
+    dir_groups: &[(&String, Vec<&Node>)],
+    notion: &impl NotionApi,
+    concurrency: usize,
+    root: &crate::ports::CreatedPage,
+) -> Result<HashMap<String, String>, RunError> {
+    let results: Vec<HashMap<String, String>> = stream::iter(dir_groups)
+        .map(|(page_id, nodes)| async move {
+            let mut ids = HashMap::new();
+            for node in nodes {
+                if placement(vault, vault_dir, node) == Placement::Index {
+                    let blocks = Converter::new()
+                        .with_notion_transformer(anchors_to_bold)
+                        .convert(&node.blocks, &HashMap::new());
+                    append_children_chunked(notion, page_id, &blocks, AppendPosition::End)
+                        .await
+                        .map_err(api_error(
+                            format!("failed to write content for node {:?}", node.title),
+                            Some(&root.url),
+                        ))?;
+                } else {
+                    let heading = vec![OrgBlock::Heading {
+                        level: 1,
+                        spans: vec![Span::Text(node.title.clone())],
+                    }];
+                    let blocks = Converter::new()
+                        .with_notion_transformer(anchors_to_bold)
+                        .convert(&heading, &HashMap::new());
+                    let block_ids =
+                        append_children_chunked(notion, page_id, &blocks, AppendPosition::End)
+                            .await
+                            .map_err(api_error(
+                                format!("failed to write heading for node {:?}", node.title),
+                                Some(&root.url),
+                            ))?;
+                    if let Some(first) = block_ids.first() {
+                        ids.insert(node.id.clone(), first.clone());
+                    }
+                }
+            }
+            Ok::<_, RunError>(ids)
+        })
+        .buffered(concurrency)
+        .try_collect()
+        .await?;
+    Ok(results.into_iter().flatten().collect())
+}
+
+/// Pass 2: convert and write each node's content. Links to merged nodes
+/// resolve to block-level URLs pointing at their heading on the shared
+/// page, so clicking a link navigates to the right section instead of
+/// the page top. This requires a two-phase write:
+///
+/// **Phase A** writes heading blocks for merged nodes and captures the
+/// block IDs Notion assigns, then builds the link map (paged → page
+/// mention, merged → block URL).
+///
+/// **Phase B** writes the actual content using that link map. Index
+/// nodes get no heading (the page title carries their title); merged
+/// nodes get a heading (written in phase A) and their body is inserted
+/// after it. Paged nodes write to their own pages as before.
 async fn write_content(
     vault: &vault::Vault,
     vault_dir: &Path,
@@ -420,55 +499,74 @@ async fn write_content(
     concurrency: usize,
     notion: &impl NotionApi,
     reporter: &mut impl Reporter,
-) -> Result<usize, RunError> {
+) -> Result<(usize, HashMap<String, LinkTarget>), RunError> {
     reporter.info("Writing content...");
-    let converter = Converter::new().with_notion_transformer(anchors_to_bold);
 
-    // Index nodes must lead their directory's page even when their file
-    // name sorts after their siblings'; the stable sort keeps everything
-    // else in path order.
-    let mut ordered: Vec<&Node> = vault.nodes.iter().collect();
-    ordered.sort_by_key(|node| {
+    let ordered: Vec<&Node> = vault.nodes.iter().collect();
+    let mut sorted = ordered.clone();
+    sorted.sort_by_key(|node| {
         (
             node_dir(node, vault_dir),
             placement(vault, vault_dir, node) != Placement::Index,
+            sortable_file_name(node),
         )
     });
 
-    // Group nodes by target page, preserving node order within each group.
+    // --- Phase A: write index content + merged headings, capture block IDs ---
+    let dir_groups = group_on_dir_by_page(vault, vault_dir, id_to_page, &sorted);
+    let heading_blocks =
+        write_headings_and_index(vault, vault_dir, &dir_groups, notion, concurrency, root)
+            .await?;
+
+    // --- Build the link map ---
+    let id_to_link = build_link_map(vault, vault_dir, id_to_page, &heading_blocks, &root.url);
+
+    // --- Phase B: write content ---
+    let converter = Converter::new().with_notion_transformer(anchors_to_bold);
+
+    // Group all nodes by target page, preserving display order.
     let mut groups: Vec<(&String, Vec<&Node>)> = Vec::new();
     let mut group_of: HashMap<&String, usize> = HashMap::new();
-    for node in ordered {
+    for node in &sorted {
+        // Index nodes were already written in Phase A.
+        if placement(vault, vault_dir, node) == Placement::Index {
+            continue;
+        }
         let page_id = &id_to_page[&node.id];
         if let Some(&i) = group_of.get(page_id) {
             groups[i].1.push(node);
         } else {
             group_of.insert(page_id, groups.len());
-            groups.push((page_id, vec![node]));
+            groups.push((page_id, vec![*node]));
         }
     }
 
     let counts: Vec<usize> = stream::iter(&groups)
         .map(|(page_id, nodes)| {
             let converter = &converter;
+            let id_to_link = &id_to_link;
+            let heading_blocks = &heading_blocks;
             async move {
                 let mut count = 0usize;
                 for node in nodes {
-                    let mut blocks = if placement(vault, vault_dir, node) == Placement::Merged {
-                        let mut with_title = vec![OrgBlock::Heading {
-                            level: 1,
-                            spans: vec![Span::Text(node.title.clone())],
-                        }];
-                        with_title.extend(node.blocks.iter().cloned());
-                        converter.convert(&with_title, id_to_page)
+                    let blocks = converter.convert(&node.blocks, id_to_link);
+                    let blocks = if node.has_tag("unreviewed") {
+                        unreviewed_banner(blocks)
                     } else {
-                        converter.convert(&node.blocks, id_to_page)
+                        blocks
                     };
-                    if node.has_tag("unreviewed") {
-                        blocks = unreviewed_banner(blocks);
-                    }
+                    let position = match placement(vault, vault_dir, node) {
+                        Placement::Merged => {
+                            let after_id = heading_blocks.get(&node.id).cloned();
+                            match after_id {
+                                Some(id) => AppendPosition::After { after_id: id },
+                                None => AppendPosition::End,
+                            }
+                        }
+                        _ => AppendPosition::End,
+                    };
                     count += blocks.len();
-                    append_children_chunked(notion, page_id, &blocks)
+                    append_children_chunked(notion, page_id, &blocks, position)
                         .await
                         .map_err(api_error(
                             format!("failed to write content for node {:?}", node.title),
@@ -481,7 +579,65 @@ async fn write_content(
         .buffered(concurrency)
         .try_collect()
         .await?;
-    Ok(counts.iter().sum())
+    let total: usize = counts.iter().sum();
+    Ok((total, id_to_link))
+}
+
+/// Group all on-directory nodes (index + merged) by their target page ID,
+/// in display order.
+fn group_on_dir_by_page<'a>(
+    vault: &'a vault::Vault,
+    vault_dir: &Path,
+    id_to_page: &'a HashMap<String, String>,
+    sorted: &[&'a Node],
+) -> Vec<(&'a String, Vec<&'a Node>)> {
+    let mut groups: Vec<(&String, Vec<&Node>)> = Vec::new();
+    let mut group_of: HashMap<&String, usize> = HashMap::new();
+    for node in sorted {
+        if placement(vault, vault_dir, node) == Placement::Paged {
+            continue;
+        }
+        let page_id = &id_to_page[&node.id];
+        if let Some(&i) = group_of.get(page_id) {
+            groups[i].1.push(*node);
+        } else {
+            group_of.insert(page_id, groups.len());
+            groups.push((page_id, vec![*node]));
+        }
+    }
+    groups
+}
+
+/// Build the org-ID → [`LinkTarget`] map. Paged and index nodes link to
+/// their page; merged nodes link to their heading block on the shared
+/// page.
+fn build_link_map(
+    vault: &vault::Vault,
+    vault_dir: &Path,
+    id_to_page: &HashMap<String, String>,
+    heading_blocks: &HashMap<String, String>,
+    root_url: &str,
+) -> HashMap<String, LinkTarget> {
+    let id_index = vault.id_index();
+    id_to_page
+        .iter()
+        .map(|(id, page_id)| {
+            let node = &id_index[id.as_str()];
+            let target = if placement(vault, vault_dir, node) == Placement::Merged {
+                match heading_blocks.get(id) {
+                    Some(bid) => LinkTarget::Block {
+                        page_id: page_id.clone(),
+                        url: format!("{root_url}#{bid}"),
+                        text: node.title.clone(),
+                    },
+                    None => LinkTarget::Page(page_id.clone()),
+                }
+            } else {
+                LinkTarget::Page(page_id.clone())
+            };
+            (id.clone(), target)
+        })
+        .collect()
 }
 
 /// Post-validation: read every page back and confirm the expected
@@ -489,7 +645,7 @@ async fn write_content(
 /// `concurrency`-wide — nodes sharing a directory page share the fetch.
 async fn post_validate_pages(
     vault: &vault::Vault,
-    id_to_page: &HashMap<String, String>,
+    id_to_link: &HashMap<String, LinkTarget>,
     root: &crate::ports::CreatedPage,
     concurrency: usize,
     notion: &impl NotionApi,
@@ -497,19 +653,25 @@ async fn post_validate_pages(
 ) -> Result<(), RunError> {
     reporter.info("Post-validating...");
     // Unique pages, each paired with the first node on it (for error
-    // context).
-    let mut seen: HashSet<&String> = HashSet::new();
-    let pages: Vec<(&String, &Node)> = vault
+    // context). Extract the page ID from the LinkTarget.
+    let page_id_of = |node: &Node| -> String {
+        match &id_to_link[&node.id] {
+            LinkTarget::Page(pid) => pid.clone(),
+            LinkTarget::Block { page_id, .. } => page_id.clone(),
+        }
+    };
+    let mut seen: HashSet<String> = HashSet::new();
+    let pages: Vec<(String, &Node)> = vault
         .nodes
         .iter()
         .filter_map(|node| {
-            let page_id = &id_to_page[&node.id];
-            seen.insert(page_id).then_some((page_id, node))
+            let page_id = page_id_of(node);
+            seen.insert(page_id.clone()).then_some((page_id, node))
         })
         .collect();
-    let fetched: HashMap<&String, HashSet<String>> = stream::iter(pages)
+    let fetched: HashMap<String, validate::FoundLinks> = stream::iter(pages)
         .map(|(page_id, node)| async move {
-            let found = validate::mention_page_ids(notion, page_id)
+            let found = validate::mention_page_ids(notion, &page_id)
                 .await
                 .map_err(api_error(
                     format!("post-validation read failed for node {:?}", node.title),
@@ -524,7 +686,10 @@ async fn post_validate_pages(
     let failures: Vec<_> = vault
         .nodes
         .iter()
-        .map(|node| validate::check_node(node, id_to_page, &fetched[&id_to_page[&node.id]]))
+        .map(|node| {
+            let page_id = page_id_of(node);
+            validate::check_node(node, id_to_link, &fetched[&page_id])
+        })
         .filter(|result| !result.passed())
         .collect();
     if failures.is_empty() {

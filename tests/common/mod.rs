@@ -7,8 +7,8 @@
 
 use notionrs_types::object::block::Block;
 use orgnotion::ports::{
-    ChildBlock, ChildrenPage, Clock, CreatedPage, Env, FileSystem, FsError, NotionApi, NotionError,
-    Reporter,
+    AppendPosition, ChildBlock, ChildrenPage, Clock, CreatedPage, Env, FileSystem, FsError,
+    NotionApi, NotionError, Reporter,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -91,7 +91,10 @@ pub struct FakeNotion {
 #[derive(Default)]
 struct FakeNotionState {
     pages: Vec<PageRecord>,
-    children: HashMap<String, Vec<Block>>,
+    /// `(block, id)` pairs, keyed by parent block ID.
+    children: HashMap<String, Vec<(Block, String)>>,
+    /// Per-parent counter for assigning stable block IDs.
+    child_id_counters: HashMap<String, usize>,
     append_calls: Vec<(String, usize)>,
     list_calls: Vec<(String, Option<String>)>,
     creates_started: usize,
@@ -114,7 +117,7 @@ impl FakeNotion {
             .borrow()
             .children
             .get(block_id)
-            .cloned()
+            .map(|v| v.iter().map(|(b, _)| b.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -179,7 +182,12 @@ impl NotionApi for FakeNotion {
         })
     }
 
-    async fn append_children(&self, block_id: &str, children: &[Block]) -> Result<(), NotionError> {
+    async fn append_children(
+        &self,
+        block_id: &str,
+        children: &[Block],
+        position: AppendPosition,
+    ) -> Result<Vec<String>, NotionError> {
         if let Some(status) = self.fail_append_status {
             return Err(NotionError::Api {
                 status,
@@ -190,12 +198,42 @@ impl NotionApi for FakeNotion {
         state
             .append_calls
             .push((block_id.to_string(), children.len()));
-        state
+        let block_id_owned = block_id.to_string();
+        let insert_at = match position {
+            AppendPosition::End => None,
+            AppendPosition::After { after_id } => {
+                let entry = state
+                    .children
+                    .entry(block_id_owned.clone())
+                    .or_default();
+                entry
+                    .iter()
+                    .position(|(_, id)| id == &after_id)
+                    .map(|p| p + 1)
+            }
+        };
+        let start = state
+            .child_id_counters
+            .entry(block_id_owned.clone())
+            .or_insert(0);
+        let begin = *start;
+        let new_pairs: Vec<(Block, String)> = children
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let id = format!("{block_id_owned}-child-{}", begin + i);
+                (b.clone(), id)
+            })
+            .collect();
+        *start += children.len();
+        let new_ids: Vec<String> = new_pairs.iter().map(|(_, id)| id.clone()).collect();
+        let entry = state
             .children
-            .entry(block_id.to_string())
-            .or_default()
-            .extend(children.iter().cloned());
-        Ok(())
+            .entry(block_id_owned)
+            .or_default();
+        let pos = insert_at.unwrap_or(entry.len());
+        entry.splice(pos..pos, new_pairs);
+        Ok(new_ids)
     }
 
     async fn list_children(
@@ -219,18 +257,12 @@ impl NotionApi for FakeNotion {
         let start: usize = cursor.map_or(0, |c| c.parse().expect("fake cursors are offsets"));
         let end = (start + self.list_page_size).min(all.len());
         let next_cursor = (end < all.len()).then(|| end.to_string());
-        // Child IDs are deterministic (`Self::child_id`); a child "has
-        // children" iff something was appended under that derived ID.
         let blocks = all[start..end]
             .iter()
-            .enumerate()
-            .map(|(offset, block)| {
-                let id = Self::child_id(block_id, start + offset);
-                ChildBlock {
-                    has_children: state.children.contains_key(&id),
-                    id,
-                    block: block.clone(),
-                }
+            .map(|(block, id)| ChildBlock {
+                has_children: state.children.contains_key(id),
+                id: id.clone(),
+                block: block.clone(),
             })
             .collect();
         Ok(ChildrenPage {

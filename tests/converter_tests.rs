@@ -5,15 +5,15 @@
 //! point, and through pattern matching where the variant is the point.
 
 use notionrs_types::object::block::Block;
-use orgnotion::converter::{Converter, convert_blocks, page_mention, text_run};
+use orgnotion::converter::{Converter, LinkTarget, convert_blocks, page_mention, text_run};
 use orgnotion::org_parser::{OrgBlock, Span};
 use serde_json::Value;
 use std::collections::HashMap;
 
-fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+fn map(pairs: &[(&str, &str)]) -> HashMap<String, LinkTarget> {
     pairs
         .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .map(|(k, v)| ((*k).to_string(), LinkTarget::Page((*v).to_string())))
         .collect()
 }
 

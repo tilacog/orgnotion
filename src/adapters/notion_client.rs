@@ -11,7 +11,9 @@
 //! into the same `notionrs_types` block model.
 
 use crate::notion::NOTION_VERSION;
-use crate::ports::{ChildBlock, ChildrenPage, CreatedPage, NotionApi, NotionError};
+use crate::ports::{
+    AppendPosition, ChildBlock, ChildrenPage, CreatedPage, NotionApi, NotionError,
+};
 use notionrs_types::object::block::Block;
 use notionrs_types::object::page::{PageProperty, title::PageTitleProperty};
 use serde::Deserialize;
@@ -168,16 +170,36 @@ impl NotionApi for NotionrsApi {
         })
     }
 
-    async fn append_children(&self, block_id: &str, children: &[Block]) -> Result<(), NotionError> {
-        self.with_retry(|| {
-            self.client
-                .append_block_children()
-                .block_id(block_id)
-                .children(children.to_vec())
-                .send()
-        })
-        .await?;
-        Ok(())
+    async fn append_children(
+        &self,
+        block_id: &str,
+        children: &[Block],
+        position: AppendPosition,
+    ) -> Result<Vec<String>, NotionError> {
+        let response = match position {
+            AppendPosition::End => {
+                self.with_retry(|| {
+                    self.client
+                        .append_block_children()
+                        .block_id(block_id)
+                        .children(children.to_vec())
+                        .send()
+                })
+                .await?
+            }
+            AppendPosition::After { after_id } => {
+                self.with_retry(|| {
+                    self.client
+                        .append_block_children()
+                        .block_id(block_id)
+                        .position_after_block(&after_id)
+                        .children(children.to_vec())
+                        .send()
+                })
+                .await?
+            }
+        };
+        Ok(response.results.iter().map(|b| b.id.clone()).collect())
     }
 
     async fn list_children(

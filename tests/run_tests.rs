@@ -251,18 +251,22 @@ async fn flat_index_dir_merges_files_onto_the_index_page() {
     assert_eq!(texts[3].1, "Title B");
     assert_eq!(texts[4].1, "Content of B.");
 
-    // A link into the merged dir mentions the merged page.
+    // A link into the merged dir is a text link pointing at the merged
+    // page (block-level URL, since the target is a merged section).
     let outside_content = serde_json::to_value(notion.children_of(&outside.id)).unwrap();
-    let mentions: Vec<_> = outside_content
+    let links: Vec<_> = outside_content
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|b| b["paragraph"]["rich_text"].as_array())
         .flatten()
-        .filter(|rt| rt["type"] == "mention")
+        .filter(|rt| rt["type"] == "text" && rt.get("href").is_some_and(|h| !h.is_null()))
         .collect();
-    assert_eq!(mentions.len(), 1);
-    assert_eq!(mentions[0]["mention"]["page"]["id"], merged.id.as_str());
+    assert_eq!(links.len(), 1);
+    assert!(links[0]["href"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://www.notion.so/"));
 
     // Post-validation fetched the merged page once, not once per node.
     let merged_lists = notion
@@ -357,6 +361,100 @@ async fn dry_run_marks_flat_index_directories() {
     // The indexed directory shows under its index node's title.
     assert!(output.contains("  - Merged Index/ (flat)"), "got: {output}");
     assert!(output.contains("  - normal/\n"), "got: {output}");
+}
+
+#[tokio::test]
+async fn merged_nodes_sort_by_name_after_stripping_org_roam_timestamp() {
+    // Files carry org-roam timestamps that don't match section numbers.
+    // Merged order must follow the logical name (1-…, 2-…, 3-…), not
+    // the timestamp.
+    let notion = FakeNotion::new();
+    let fs = InMemoryFileSystem::with_files(&[
+        (
+            "/vault/merged/20260101100000-3-third.org",
+            &org("c", "Title 3", "Content of C."),
+        ),
+        (
+            "/vault/merged/20260101090000-1-first.org",
+            &org("a", "Title 1", "Content of A."),
+        ),
+        (
+            "/vault/merged/20260101093000-2-second.org",
+            &org("b", "Title 2", "Content of B."),
+        ),
+        (
+            "/vault/merged/index.org",
+            &org("i", "Merged Index", "Index intro."),
+        ),
+        ("/vault/merged/.INDEX", "index.org\nflat = true\n"),
+    ]);
+    run_with(&config(), &fs, &notion).await.unwrap();
+
+    let pages = notion.pages();
+    let merged = pages.iter().find(|p| p.title == "Merged Index").unwrap();
+    let texts = page_texts(&notion, &merged.id);
+
+    // Index node first (no heading), then merged nodes in section order.
+    assert_eq!(texts[0].1, "Index intro.");
+    assert_eq!(texts[1].1, "Title 1");
+    assert_eq!(texts[3].1, "Title 2");
+    assert_eq!(texts[5].1, "Title 3");
+}
+
+#[tokio::test]
+async fn links_to_merged_nodes_resolve_to_block_level_urls() {
+    // A link from outside the merged dir to a merged node should produce
+    // a text link with an href pointing at the heading block on the
+    // merged page — not a page mention.
+    let notion = FakeNotion::new();
+    let fs = InMemoryFileSystem::with_files(&[
+        ("/vault/merged/index.org", &org("i", "Index", "Intro.")),
+        ("/vault/merged/a.org", &org("a", "Title A", "Body A.")),
+        ("/vault/merged/.INDEX", "index.org\nflat = true\n"),
+        (
+            "/vault/outside.org",
+            &org("out", "Outside", "See [[id:a][A]]."),
+        ),
+    ]);
+    run_with(&config(), &fs, &notion).await.unwrap();
+
+    let pages = notion.pages();
+    let outside = pages.iter().find(|p| p.title == "Outside").unwrap();
+    let content = serde_json::to_value(notion.children_of(&outside.id)).unwrap();
+
+    // The link should be a text run with href (block-level URL), not a
+    // page mention.
+    let text_links: Vec<_> = content
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|b| b["paragraph"]["rich_text"].as_array())
+        .flatten()
+        .filter(|rt| {
+            rt["type"] == "text" && rt.get("href").is_some_and(|h| !h.is_null())
+        })
+        .collect();
+    assert_eq!(text_links.len(), 1, "expected exactly one text link");
+    let href = text_links[0]["href"].as_str().unwrap();
+    assert!(
+        href.contains('#'),
+        "href should contain a block anchor: {href}"
+    );
+    assert!(
+        href.starts_with("https://www.notion.so/"),
+        "href should point at Notion: {href}"
+    );
+
+    // And there should be no page mentions on the outside page.
+    let mentions: Vec<_> = content
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|b| b["paragraph"]["rich_text"].as_array())
+        .flatten()
+        .filter(|rt| rt["type"] == "mention")
+        .collect();
+    assert!(mentions.is_empty(), "expected no page mentions");
 }
 
 #[tokio::test]

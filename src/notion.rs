@@ -2,7 +2,7 @@
 //! written against the [`NotionApi`] port, so both are unit-testable with
 //! a fake implementation.
 
-use crate::ports::{ChildBlock, NotionApi, NotionError};
+use crate::ports::{AppendPosition, ChildBlock, NotionApi, NotionError};
 use notionrs_types::object::block::Block;
 use std::collections::VecDeque;
 
@@ -17,7 +17,8 @@ pub const NOTION_VERSION: &str = "2026-03-11";
 pub const MAX_CHILDREN_PER_REQUEST: usize = 100;
 
 /// Append `children` to `block_id` in chunks of at most
-/// [`MAX_CHILDREN_PER_REQUEST`], in order.
+/// [`MAX_CHILDREN_PER_REQUEST`], in order. Returns the block IDs Notion
+/// assigned, concatenated across chunks in order.
 ///
 /// # Errors
 ///
@@ -27,11 +28,14 @@ pub async fn append_children_chunked(
     notion: &impl NotionApi,
     block_id: &str,
     children: &[Block],
-) -> Result<(), NotionError> {
+    position: AppendPosition,
+) -> Result<Vec<String>, NotionError> {
+    let mut ids = Vec::with_capacity(children.len());
     for chunk in children.chunks(MAX_CHILDREN_PER_REQUEST) {
-        notion.append_children(block_id, chunk).await?;
+        let chunk_ids = notion.append_children(block_id, chunk, position.clone()).await?;
+        ids.extend(chunk_ids);
     }
-    Ok(())
+    Ok(ids)
 }
 
 /// Fetch all direct child blocks of `block_id`, following pagination

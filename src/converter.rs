@@ -19,10 +19,28 @@ use notionrs_types::object::language::Language;
 use notionrs_types::object::rich_text::{
     RichText, RichTextAnnotations,
     mention::{Mention, PageMention},
-    text::Text,
+    text::{Text, TextLink},
 };
 use std::collections::HashMap;
 use std::str::FromStr;
+
+/// How an `[[id:...]]` link resolves in the published snapshot.
+#[derive(Debug, Clone)]
+pub enum LinkTarget {
+    /// A page mention — the link target has its own Notion page.
+    Page(String),
+    /// A URL link to a specific block on a page — the link target is
+    /// merged onto a directory page, and `url` points at its heading
+    /// block (`https://notion.so/{page_id}#{block_id}`).
+    Block {
+        /// The Notion page ID the block lives on.
+        page_id: String,
+        /// The full URL with anchor (`page_url#block_id`).
+        url: String,
+        /// Display text for the link.
+        text: String,
+    },
+}
 
 /// Notion's rich-text content length limit per text object.
 const MAX_TEXT_LEN: usize = 2000;
@@ -81,22 +99,27 @@ impl Converter {
 
     /// Run the full pipeline over a node's blocks.
     ///
-    /// `id_to_page` maps org-roam node ID → Notion page ID, and must
-    /// already contain an entry for every node in the vault (all node
-    /// pages are created blank before any content is written, precisely
-    /// so this map is complete before conversion starts).
+    /// `id_to_link` maps org-roam node ID → [`LinkTarget`] (page mention
+    /// or block URL), and must already contain an entry for every node
+    /// in the vault (all node pages are created blank before any content
+    /// is written, precisely so this map is complete before conversion
+    /// starts).
     // implicit_hasher: this is an application, not a library API — callers
     // always pass the std default-hashed map built by the run orchestration.
     #[allow(clippy::implicit_hasher)]
     #[must_use]
-    pub fn convert(&self, blocks: &[OrgBlock], id_to_page: &HashMap<String, String>) -> Vec<Block> {
+    pub fn convert(
+        &self,
+        blocks: &[OrgBlock],
+        id_to_link: &HashMap<String, LinkTarget>,
+    ) -> Vec<Block> {
         let blocks = self
             .org_transformers
             .iter()
             .fold(blocks.to_vec(), |acc, step| step(acc));
         let converted = blocks
             .iter()
-            .map(|b| convert_block(b, id_to_page))
+            .map(|b| convert_block(b, id_to_link))
             .collect();
         self.notion_transformers
             .iter()
@@ -106,17 +129,20 @@ impl Converter {
 
 /// Convert every block of a node into typed Notion blocks with no extra
 /// pipeline steps. Shorthand for [`Converter::new().convert(...)`];
-/// see [`Converter::convert`] for the `id_to_page` contract.
+/// see [`Converter::convert`] for the `id_to_link` contract.
 #[allow(clippy::implicit_hasher)]
 #[must_use]
-pub fn convert_blocks(blocks: &[OrgBlock], id_to_page: &HashMap<String, String>) -> Vec<Block> {
-    Converter::new().convert(blocks, id_to_page)
+pub fn convert_blocks(
+    blocks: &[OrgBlock],
+    id_to_link: &HashMap<String, LinkTarget>,
+) -> Vec<Block> {
+    Converter::new().convert(blocks, id_to_link)
 }
 
-fn convert_block(block: &OrgBlock, id_to_page: &HashMap<String, String>) -> Block {
+fn convert_block(block: &OrgBlock, id_to_link: &HashMap<String, LinkTarget>) -> Block {
     match block {
         OrgBlock::Heading { level, spans } => {
-            let heading = HeadingBlock::default().rich_text(rich_text(spans, id_to_page));
+            let heading = HeadingBlock::default().rich_text(rich_text(spans, id_to_link));
             match level {
                 1 => Block::Heading1 { heading_1: heading },
                 2 => Block::Heading2 { heading_2: heading },
@@ -124,18 +150,18 @@ fn convert_block(block: &OrgBlock, id_to_page: &HashMap<String, String>) -> Bloc
             }
         }
         OrgBlock::Paragraph { spans } => Block::Paragraph {
-            paragraph: ParagraphBlock::default().rich_text(rich_text(spans, id_to_page)),
+            paragraph: ParagraphBlock::default().rich_text(rich_text(spans, id_to_link)),
         },
         OrgBlock::BulletItem { spans } => Block::BulletedListItem {
             bulleted_list_item: BulletedListItemBlock::default()
-                .rich_text(rich_text(spans, id_to_page)),
+                .rich_text(rich_text(spans, id_to_link)),
         },
         OrgBlock::NumberedItem { spans } => Block::NumberedListItem {
             numbered_list_item: NumberedListItemBlock::default()
-                .rich_text(rich_text(spans, id_to_page)),
+                .rich_text(rich_text(spans, id_to_link)),
         },
         OrgBlock::Quote { spans } => Block::Quote {
-            quote: QuoteBlock::default().rich_text(rich_text(spans, id_to_page)),
+            quote: QuoteBlock::default().rich_text(rich_text(spans, id_to_link)),
         },
         OrgBlock::CodeBlock { language, content } => Block::Code {
             code: CodeBlock {
@@ -217,12 +243,12 @@ pub fn rich_text_mut(block: &mut Block) -> Option<&mut Vec<RichText>> {
 }
 
 /// Turn a run of [`Span`]s into Notion rich text. An unresolvable link
-/// (a node ID not present in `id_to_page`) degrades to plain text instead
+/// (a node ID not present in `id_to_link`) degrades to plain text instead
 /// of crashing the run.
 ///
 /// Pre-validation should already guarantee every link resolves within the
 /// vault, so the fallback is defensive only.
-fn rich_text(spans: &[Span], id_to_page: &HashMap<String, String>) -> Vec<RichText> {
+fn rich_text(spans: &[Span], id_to_link: &HashMap<String, LinkTarget>) -> Vec<RichText> {
     let mut out = Vec::new();
     for span in spans {
         match span {
@@ -231,13 +257,19 @@ fn rich_text(spans: &[Span], id_to_page: &HashMap<String, String>) -> Vec<RichTe
                 out.extend(chunked_annotated_runs(text, annotations_for(*markup)));
             }
             Span::LinkRef { id, description } => {
-                if let Some(page_id) = id_to_page.get(id) {
-                    out.push(page_mention(page_id));
-                } else {
-                    let fallback = description
-                        .clone()
-                        .unwrap_or_else(|| format!("[[id:{id}]]"));
-                    out.extend(chunked_text_runs(&fallback));
+                match id_to_link.get(id) {
+                    Some(LinkTarget::Page(page_id)) => {
+                        out.push(page_mention(page_id));
+                    }
+                    Some(LinkTarget::Block { url, text, .. }) => {
+                        out.extend(chunked_link_runs(text, url));
+                    }
+                    None => {
+                        let fallback = description
+                            .clone()
+                            .unwrap_or_else(|| format!("[[id:{id}]]"));
+                        out.extend(chunked_text_runs(&fallback));
+                    }
                 }
             }
         }
@@ -271,6 +303,30 @@ fn chunked_annotated_runs(text: &str, annotations: RichTextAnnotations) -> Vec<R
         .collect::<Vec<char>>()
         .chunks(MAX_TEXT_LEN)
         .map(|c| annotated(&c.iter().collect::<String>()))
+        .collect()
+}
+
+/// Like [`chunked_text_runs`] but every run carries `url` as an inline
+/// link — how block-level links to merged sections are represented.
+fn chunked_link_runs(text: &str, url: &str) -> Vec<RichText> {
+    let linked = |content: &str| {
+        RichText::Text {
+            text: Text {
+                content: content.to_string(),
+                link: Some(TextLink { url: url.to_string() }),
+            },
+            annotations: RichTextAnnotations::default(),
+            plain_text: content.to_string(),
+            href: Some(url.to_string()),
+        }
+    };
+    if text.is_empty() {
+        return vec![linked("")];
+    }
+    text.chars()
+        .collect::<Vec<char>>()
+        .chunks(MAX_TEXT_LEN)
+        .map(|c| linked(&c.iter().collect::<String>()))
         .collect()
 }
 

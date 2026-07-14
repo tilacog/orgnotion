@@ -85,6 +85,15 @@ pub struct ChildrenPage {
     pub next_cursor: Option<String>,
 }
 
+/// Where to insert blocks relative to a parent's existing children.
+#[derive(Debug, Clone)]
+pub enum AppendPosition {
+    /// Append at the end (the API default).
+    End,
+    /// Insert immediately after this block.
+    After { after_id: String },
+}
+
 /// The subset of the Notion REST API this tool needs.
 ///
 /// Pagination is exposed cursor-by-cursor (rather than hidden inside the
@@ -111,7 +120,8 @@ pub trait NotionApi {
         title: &str,
     ) -> Result<CreatedPage, NotionError>;
 
-    /// `PATCH /v1/blocks/{block_id}/children`: append child blocks.
+    /// `PATCH /v1/blocks/{block_id}/children`: append child blocks,
+    /// returning the IDs Notion assigned to each block, in order.
     ///
     /// Callers must respect Notion's limit of 100 children per call;
     /// chunking is orchestration logic, not transport logic.
@@ -119,7 +129,12 @@ pub trait NotionApi {
     /// # Errors
     ///
     /// Returns an error on transport failure or a non-success API status.
-    async fn append_children(&self, block_id: &str, children: &[Block]) -> Result<(), NotionError>;
+    async fn append_children(
+        &self,
+        block_id: &str,
+        children: &[Block],
+        position: AppendPosition,
+    ) -> Result<Vec<String>, NotionError>;
 
     /// `GET /v1/blocks/{block_id}/children`: fetch one page of children,
     /// starting at `cursor` (or the beginning when `None`).

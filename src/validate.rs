@@ -5,7 +5,7 @@
 //! after writing and confirms the mentions Notion actually stored point
 //! at the expected target pages.
 
-use crate::converter::rich_text_of;
+use crate::converter::{LinkTarget, rich_text_of};
 use crate::notion::fetch_all_children_recursive;
 use crate::org_parser::Node;
 use crate::ports::{ChildBlock, NotionApi, NotionError};
@@ -82,8 +82,9 @@ impl PostValidationResult {
 }
 
 /// After a node's content has been written to Notion, fetch it back and
-/// confirm every expected link mention is present, pointing at the right
-/// Notion page ID (per the in-memory `id_to_page` map).
+/// confirm every expected link is present — as a page mention for paged
+/// nodes, or as a text-link URL for merged nodes — pointing at the right
+/// target.
 ///
 /// # Errors
 ///
@@ -96,9 +97,9 @@ impl PostValidationResult {
 pub async fn post_validate(
     notion: &impl NotionApi,
     node: &Node,
-    id_to_page: &HashMap<String, String>,
+    id_to_link: &HashMap<String, LinkTarget>,
 ) -> Result<PostValidationResult, NotionError> {
-    let Some(page_id) = id_to_page.get(&node.id) else {
+    let Some(target) = id_to_link.get(&node.id) else {
         // Unreachable if the run created a page per node, but don't panic
         // in a validation path — report every link as missing instead.
         return Ok(PostValidationResult {
@@ -106,14 +107,18 @@ pub async fn post_validate(
             missing: node.links.clone(),
         });
     };
+    let page_id = match target {
+        LinkTarget::Page(pid) => pid,
+        LinkTarget::Block { page_id, .. } => page_id,
+    };
     let found = mention_page_ids(notion, page_id).await?;
-    Ok(check_node(node, id_to_page, &found))
+    Ok(check_node(node, id_to_link, &found))
 }
 
-/// Fetch a page's content back from Notion and collect the page IDs of
-/// every page mention it carries. Callers validating several nodes that
-/// share one page (a directory with an index) fetch once and run
-/// [`check_node`] per node.
+/// Fetch a page's content back from Notion and collect every link
+/// reference it carries: page-mention IDs and text-link URLs. Callers
+/// validating several nodes that share one page (a directory with an
+/// index) fetch once and run [`check_node`] per node.
 ///
 /// # Errors
 ///
@@ -121,28 +126,30 @@ pub async fn post_validate(
 pub async fn mention_page_ids(
     notion: &impl NotionApi,
     page_id: &str,
-) -> Result<HashSet<String>, NotionError> {
+) -> Result<FoundLinks, NotionError> {
     let children = fetch_all_children_recursive(notion, page_id).await?;
-    Ok(collect_mention_page_ids(&children))
+    Ok(collect_links(&children))
 }
 
-/// Check one node's expected mentions against the page-mention IDs
-/// actually `found` on its page.
+/// Check one node's expected links against the page-mention IDs and
+/// link URLs actually `found` on its page.
 // implicit_hasher: see `post_validate`.
 #[allow(clippy::implicit_hasher)]
 #[must_use]
 pub fn check_node(
     node: &Node,
-    id_to_page: &HashMap<String, String>,
-    found: &HashSet<String>,
+    id_to_link: &HashMap<String, LinkTarget>,
+    found: &FoundLinks,
 ) -> PostValidationResult {
     let missing = node
         .links
         .iter()
         .filter(|target| {
-            id_to_page
-                .get(*target)
-                .is_none_or(|expected| !found.contains(expected))
+            match id_to_link.get(*target) {
+                Some(LinkTarget::Page(page_id)) => !found.page_ids.contains(page_id),
+                Some(LinkTarget::Block { url, .. }) => !found.link_urls.contains(url),
+                None => true,
+            }
         })
         .cloned()
         .collect();
@@ -153,21 +160,38 @@ pub fn check_node(
     }
 }
 
-/// Walk the fetched blocks and collect the page IDs of every page-mention
-/// rich-text entry.
-fn collect_mention_page_ids(blocks: &[ChildBlock]) -> HashSet<String> {
-    let mut found = HashSet::new();
+/// All link references found on a page: page-mention IDs (from `@page`
+/// mentions) and text-link URLs (from inline `href` fields).
+#[derive(Debug, Default, Clone)]
+pub struct FoundLinks {
+    /// Notion page IDs from page mentions.
+    pub page_ids: HashSet<String>,
+    /// URLs from text-link `href` fields (block-level links).
+    pub link_urls: HashSet<String>,
+}
+
+/// Walk the fetched blocks and collect every link reference: page-mention
+/// IDs and text-link `href` URLs.
+fn collect_links(blocks: &[ChildBlock]) -> FoundLinks {
+    let mut found = FoundLinks::default();
     for child in blocks {
         let Some(rich_text) = rich_text_of(&child.block) else {
             continue;
         };
         for rt in rich_text {
-            if let RichText::Mention {
-                mention: Mention::Page { page },
-                ..
-            } = rt
-            {
-                found.insert(page.id.clone());
+            match rt {
+                RichText::Mention {
+                    mention: Mention::Page { page },
+                    ..
+                } => {
+                    found.page_ids.insert(page.id.clone());
+                }
+                RichText::Text { text, .. } => {
+                    if let Some(link) = &text.link {
+                        found.link_urls.insert(link.url.clone());
+                    }
+                }
+                _ => {}
             }
         }
     }

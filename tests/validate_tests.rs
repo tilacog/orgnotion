@@ -8,9 +8,9 @@ use notionrs_types::object::block::{
     Block, bulleted_list_item::BulletedListItemBlock, paragraph::ParagraphBlock,
 };
 use notionrs_types::object::rich_text::RichText;
-use orgnotion::converter::{page_mention, text_run};
+use orgnotion::converter::{LinkTarget, page_mention, text_run};
 use orgnotion::org_parser::Node;
-use orgnotion::ports::NotionApi;
+use orgnotion::ports::{AppendPosition, NotionApi};
 use orgnotion::validate::{post_validate, pre_validate};
 use orgnotion::vault::Vault;
 use std::collections::{BTreeMap, HashMap};
@@ -33,10 +33,10 @@ fn node(id: &str, links: &[&str]) -> Node {
     }
 }
 
-fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+fn map(pairs: &[(&str, &str)]) -> HashMap<String, LinkTarget> {
     pairs
         .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .map(|(k, v)| ((*k).to_string(), LinkTarget::Page((*v).to_string())))
         .collect()
 }
 
@@ -81,6 +81,7 @@ async fn post_validate_passes_when_mentions_landed() {
         .append_children(
             "page-a",
             &[paragraph(vec![text_run("see "), page_mention("page-b")])],
+            AppendPosition::End,
         )
         .await
         .unwrap();
@@ -99,7 +100,7 @@ async fn post_validate_passes_when_mentions_landed() {
 async fn post_validate_flags_missing_mention() {
     let notion = FakeNotion::new();
     notion
-        .append_children("page-a", &[paragraph(vec![text_run("no mention here")])])
+        .append_children("page-a", &[paragraph(vec![text_run("no mention here")])], AppendPosition::End)
         .await
         .unwrap();
 
@@ -118,7 +119,7 @@ async fn post_validate_flags_missing_mention() {
 async fn post_validate_flags_mention_of_wrong_page() {
     let notion = FakeNotion::new();
     notion
-        .append_children("page-a", &[paragraph(vec![page_mention("page-INTRUDER")])])
+        .append_children("page-a", &[paragraph(vec![page_mention("page-INTRUDER")])], AppendPosition::End)
         .await
         .unwrap();
 
@@ -141,7 +142,7 @@ async fn post_validate_follows_pagination_cursors() {
         .map(|t| paragraph(vec![text_run(t)]))
         .chain(std::iter::once(paragraph(vec![page_mention("page-b")])))
         .collect();
-    notion.append_children("page-a", &blocks).await.unwrap();
+    notion.append_children("page-a", &blocks, AppendPosition::End).await.unwrap();
 
     let result = post_validate(
         &notion,
@@ -172,6 +173,7 @@ async fn post_validate_finds_mentions_in_nested_blocks() {
                 bulleted_list_item: BulletedListItemBlock::default()
                     .rich_text(vec![text_run("outer")]),
             }],
+            AppendPosition::End,
         )
         .await
         .unwrap();
@@ -179,6 +181,7 @@ async fn post_validate_finds_mentions_in_nested_blocks() {
         .append_children(
             &FakeNotion::child_id("page-a", 0),
             &[paragraph(vec![page_mention("page-b")])],
+            AppendPosition::End,
         )
         .await
         .unwrap();
