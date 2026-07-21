@@ -295,11 +295,40 @@ fn dedicated_targets_pass_through_as_literal_text() {
 }
 
 #[test]
-fn non_id_links_are_left_as_plain_text() {
-    let node = parse(":PROPERTIES:\n:ID: a\n:END:\n\nSee [[https://example.com][site]].\n");
+fn external_links_become_external_link_spans() {
+    let node = parse(
+        ":PROPERTIES:\n:ID: a\n:END:\n\n\
+         See [[https://example.com][site]] and [[https://example.org]] \
+         or write to [[mailto:hi@example.com][us]].\n",
+    );
     assert!(node.links.is_empty());
     match &node.blocks[0] {
-        OrgBlock::Paragraph { spans } => assert_eq!(spans.len(), 1),
+        OrgBlock::Paragraph { spans } => {
+            assert!(spans.contains(&Span::ExternalLink {
+                url: "https://example.com".to_string(),
+                description: Some("site".to_string()),
+            }));
+            assert!(spans.contains(&Span::ExternalLink {
+                url: "https://example.org".to_string(),
+                description: None,
+            }));
+            assert!(spans.contains(&Span::ExternalLink {
+                url: "mailto:hi@example.com".to_string(),
+                description: Some("us".to_string()),
+            }));
+        }
+        other => panic!("expected paragraph, got {other:?}"),
+    }
+}
+
+#[test]
+fn non_url_links_are_left_as_plain_text() {
+    let node = parse(":PROPERTIES:\n:ID: a\n:END:\n\nSee [[file:notes.org][notes]].\n");
+    assert!(node.links.is_empty());
+    match &node.blocks[0] {
+        OrgBlock::Paragraph { spans } => {
+            assert_eq!(spans, &[Span::Text("See notes.".to_string())]);
+        }
         other => panic!("expected paragraph, got {other:?}"),
     }
 }

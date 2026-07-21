@@ -218,6 +218,33 @@ fn unresolved_link_prefers_its_description() {
 }
 
 #[test]
+fn external_link_becomes_inline_link_run() {
+    let blocks = convert_blocks(
+        &[OrgBlock::Paragraph {
+            spans: vec![
+                Span::ExternalLink {
+                    url: "https://example.com".to_string(),
+                    description: Some("site".to_string()),
+                },
+                Span::ExternalLink {
+                    url: "https://example.org".to_string(),
+                    description: None,
+                },
+            ],
+        }],
+        &map(&[]),
+    );
+    let j = json(&blocks);
+    let rich = j[0]["paragraph"]["rich_text"].as_array().unwrap();
+    assert_eq!(rich[0]["type"], "text");
+    assert_eq!(rich[0]["text"]["content"], "site");
+    assert_eq!(rich[0]["text"]["link"]["url"], "https://example.com");
+    // A bare URL links to itself, with the URL as display text.
+    assert_eq!(rich[1]["text"]["content"], "https://example.org");
+    assert_eq!(rich[1]["text"]["link"]["url"], "https://example.org");
+}
+
+#[test]
 fn long_text_is_chunked_to_notion_limit() {
     let long = "a".repeat(4500);
     let blocks = convert_blocks(

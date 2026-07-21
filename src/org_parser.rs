@@ -9,6 +9,7 @@
 //! - `[[id:UUID]]` / `[[id:UUID][description]]` links to other org-roam
 //!   nodes; an org `::search-target` suffix after the UUID (e.g.
 //!   `[[id:UUID::§1.2]]`) is dropped, the link resolves to the node
+//! - links to external sources (`https:`, `mailto:`, …), kept as links
 //! - file-level tags (`#+filetags:`)
 //! - a coarse block structure (headings, paragraphs, list items, quotes,
 //!   source blocks) good enough to convert into Notion blocks
@@ -106,6 +107,13 @@ pub enum Span {
     LinkRef {
         /// Target node's org-roam ID.
         id: String,
+        /// Link description, if the org link had one.
+        description: Option<String>,
+    },
+    /// A link to an external source (`https:`, `mailto:`, …).
+    ExternalLink {
+        /// The link target URL, as written in the org file.
+        url: String,
         /// Link description, if the org link had one.
         description: Option<String>,
     },
@@ -374,7 +382,7 @@ impl SpanBuilder {
         self.flush();
         let last_text = self.spans.last_mut().and_then(|s| match s {
             Span::Text(t) | Span::Marked { text: t, .. } => Some(t),
-            Span::LinkRef { .. } => None,
+            Span::LinkRef { .. } | Span::ExternalLink { .. } => None,
         });
         if let Some(t) = last_text {
             let trimmed = t.trim_end().to_string();
@@ -448,11 +456,28 @@ fn visit_link(n: &SyntaxNode, builder: &mut SpanBuilder, markup: Option<Markup>)
             id: id.to_string(),
             description,
         });
+    } else if is_external_url(&path) {
+        let description = if link.has_description() {
+            Some(link.description_raw())
+        } else {
+            None
+        };
+        builder.push_span(Span::ExternalLink {
+            url: path,
+            description,
+        });
     } else if link.has_description() {
         builder.push_str(&link.description_raw(), markup);
     } else {
         builder.push_str(&path, markup);
     }
+}
+
+/// Whether an org link path points at an external source Notion can link
+/// to (`scheme://…` or `mailto:`). Other paths (e.g. `file:` links to
+/// local files) stay plain text.
+fn is_external_url(path: &str) -> bool {
+    path.contains("://") || path.starts_with("mailto:")
 }
 
 /// The [`Markup`] and delimiter token kind of an org emphasis node.
@@ -471,7 +496,7 @@ fn markup_of(kind: SyntaxKind) -> Option<(Markup, SyntaxKind)> {
 fn is_effectively_empty(spans: &[Span]) -> bool {
     spans.iter().all(|s| match s {
         Span::Text(t) | Span::Marked { text: t, .. } => t.trim().is_empty(),
-        Span::LinkRef { .. } => false,
+        Span::LinkRef { .. } | Span::ExternalLink { .. } => false,
     })
 }
 
@@ -483,6 +508,9 @@ fn spans_to_plain_text(spans: &[Span]) -> String {
         .map(|s| match s {
             Span::Text(t) | Span::Marked { text: t, .. } => t.clone(),
             Span::LinkRef { description, id } => description.clone().unwrap_or_else(|| id.clone()),
+            Span::ExternalLink { description, url } => {
+                description.clone().unwrap_or_else(|| url.clone())
+            }
         })
         .collect::<String>()
 }

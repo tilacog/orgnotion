@@ -272,6 +272,10 @@ fn rich_text(spans: &[Span], id_to_link: &HashMap<String, LinkTarget>) -> Vec<Ri
                     }
                 }
             }
+            Span::ExternalLink { url, description } => {
+                let text = description.as_deref().unwrap_or(url);
+                out.extend(chunked_link_runs(text, url));
+            }
         }
     }
     if out.is_empty() {
